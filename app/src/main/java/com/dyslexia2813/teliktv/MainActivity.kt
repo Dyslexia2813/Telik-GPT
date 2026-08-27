@@ -1,60 +1,131 @@
 package com.dyslexia2813.teliktv
 
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.graphics.Color
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
-import android.app.Activity
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
 
     companion object {
-        private const val STREAM_URL =
-            "https://tvcdnpotok.com/SisoGy7Jf7rvOMhjXunSIA/2025/1787784141/index.m3u8"
+        private const val CHANNEL_URL = "https://telik.live/zhivaya-priroda.html"
+        private const val RETRY_DELAY_MS = 3000L
+        private const val MAX_RESOLVE_TIME_MS = 15000L
     }
 
-    private var player: ExoPlayer? = null
     private lateinit var playerView: PlayerView
+    private lateinit var resolverWebView: WebView
+    private var player: ExoPlayer? = null
+    private val resolving = AtomicBoolean(false)
+    private var resolved = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         hideSystemUi()
 
         playerView = PlayerView(this).apply {
+            setBackgroundColor(Color.BLACK)
             useController = false
             keepScreenOn = true
         }
-
         setContentView(playerView)
-        initializePlayer()
+        createResolverWebView()
+        resolveAndPlay()
     }
 
-    private fun initializePlayer() {
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createResolverWebView() {
+        resolverWebView = WebView(this).apply {
+            visibility = View.GONE
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.mediaPlaybackRequiresUserGesture = false
+            settings.loadsImagesAutomatically = false
+            settings.blockNetworkImage = true
+            webChromeClient = WebChromeClient()
+            webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                    request?.url?.toString()?.let(::checkForStreamUrl)
+                    return super.shouldInterceptRequest(view, request)
+                }
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    view?.evaluateJavascript(
+                        "(function(){var a=document.querySelectorAll('video,source');for(var i=0;i<a.length;i++){if(a[i].src)return a[i].src;}return '';})()"
+                    ) { value ->
+                        val urlValue = value.trim('"').replace("\\/", "/")
+                        if (urlValue.contains(".m3u8")) checkForStreamUrl(urlValue)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun checkForStreamUrl(url: String) {
+        if (url.contains(".m3u8", ignoreCase = true) && !resolved) {
+            runOnUiThread { playResolvedUrl(url) }
+        }
+    }
+
+    private fun resolveAndPlay() {
+        if (!resolving.compareAndSet(false, true)) return
+        resolved = false
+        resolverWebView.stopLoading()
+        resolverWebView.loadUrl(CHANNEL_URL)
+
+        resolverWebView.postDelayed({
+            if (!resolved && resolving.get()) scheduleResolveRetry()
+        }, MAX_RESOLVE_TIME_MS)
+    }
+
+    private fun playResolvedUrl(url: String) {
+        if (resolved) return
+        resolved = true
+        resolving.set(false)
+        resolverWebView.stopLoading()
+
+        player?.release()
         val dataSourceFactory = DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Linux; Android 10; Android TV)")
-            .setDefaultRequestProperties(
-                mapOf(
-                    "Origin" to "https://cdntvmedia.com",
-                    "Referer" to "https://cdntvmedia.com/"
-                )
-            )
+            .setDefaultRequestProperties(mapOf("Referer" to "https://cdntvmedia.com/"))
 
         player = ExoPlayer.Builder(this)
-            .setMediaSourceFactory(
-                androidx.media3.exoplayer.source.DefaultMediaSourceFactory(dataSourceFactory)
-            )
+            .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
             .build()
             .also { exoPlayer ->
                 playerView.player = exoPlayer
-                exoPlayer.setMediaItem(MediaItem.fromUri(STREAM_URL))
-                exoPlayer.playWhenReady = true
+                exoPlayer.addListener(object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        playerView.postDelayed({ resolveAndPlay() }, RETRY_DELAY_MS)
+                    }
+                })
+                exoPlayer.setMediaItem(MediaItem.fromUri(url))
                 exoPlayer.prepare()
+                exoPlayer.play()
             }
+    }
+
+    private fun scheduleResolveRetry() {
+        resolving.set(false)
+        resolverWebView.stopLoading()
+        resolverWebView.postDelayed({ resolveAndPlay() }, RETRY_DELAY_MS)
     }
 
     private fun hideSystemUi() {
@@ -73,20 +144,10 @@ class MainActivity : Activity() {
         if (hasFocus) hideSystemUi()
     }
 
-    override fun onStart() {
-        super.onStart()
-        player?.play()
-    }
-
-    override fun onStop() {
-        player?.pause()
-        super.onStop()
-    }
-
     override fun onDestroy() {
         playerView.player = null
         player?.release()
-        player = null
+        resolverWebView.destroy()
         super.onDestroy()
     }
 }
