@@ -78,9 +78,8 @@ class MainActivity : Activity() {
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
                     view: WebView?,
-                    request: WebResourceRequest?
+                    request: WebResourceRequest
                 ): WebResourceResponse? {
-                    if (request == null) return super.shouldInterceptRequest(view, request)
                     val url = request.url.toString()
                     if (url.contains(".m3u8", ignoreCase = true)) {
                         Log.d(TAG, "Stream URL detected: $url")
